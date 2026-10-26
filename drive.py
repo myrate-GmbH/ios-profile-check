@@ -1,6 +1,6 @@
 """Walk an iOS Simulator, in German, through installing each profile in profiles/ from Safari, and
 save a screenshot and the accessibility tree at every screen into out/<profile>/."""
-import http.server, json, os, subprocess, sys, threading, time
+import functools, http.server, json, os, re, subprocess, sys, threading, time
 
 OUT = 'out'
 PORT = 8765
@@ -24,14 +24,18 @@ def run(*cmd, check=True):
     return r.stdout
 
 
-def device():
+def devices():
+    """The newest iPhone on the newest iOS 18 runtime and on the newest runtime past it."""
     d = json.loads(run('xcrun', 'simctl', 'list', 'devices', 'available', '-j'))['devices']
-    for runtime in sorted(d, reverse=True):
-        if 'iOS' in runtime:
-            for dev in d[runtime]:
-                if dev['name'].startswith('iPhone 16'):
-                    return dev['udid'], runtime, dev['name']
-    raise SystemExit('no iPhone simulator')
+    picked = {}
+    for runtime in sorted((r for r in d if 'iOS' in r), key=lambda r: [int(x) for x in re.findall(r'\d+', r)]):
+        major = int(re.findall(r'iOS-(\d+)', runtime)[0])
+        phones = [x for x in d[runtime] if x['name'].startswith('iPhone')]
+        if phones and major >= 18:
+            picked['18' if major == 18 else 'newer'] = (phones[-1]['udid'], runtime, phones[-1]['name'])
+    if not picked:
+        raise SystemExit('no iPhone simulator')
+    return list(picked.values())
 
 
 class Serve(http.server.SimpleHTTPRequestHandler):
@@ -40,8 +44,7 @@ class Serve(http.server.SimpleHTTPRequestHandler):
 
 
 def serve():
-    os.chdir('profiles')
-    http.server.ThreadingHTTPServer(('127.0.0.1', PORT), Serve).serve_forever()
+    http.server.ThreadingHTTPServer(('127.0.0.1', PORT), functools.partial(Serve, directory='profiles')).serve_forever()
 
 
 def fresh(udid):
@@ -54,6 +57,7 @@ def fresh(udid):
     run('xcrun', 'simctl', 'shutdown', udid)
     run('xcrun', 'simctl', 'boot', udid)
     run('xcrun', 'simctl', 'bootstatus', udid, '-b')
+    run('idb', 'connect', udid, check=False)
     time.sleep(8)
 
 
@@ -64,8 +68,8 @@ def tree(udid):
         return []
 
 
-def walk(udid, name):
-    d = os.path.join(OUT, name)
+def walk(udid, name, tag):
+    d = os.path.join(OUT, tag, name)
     os.makedirs(d, exist_ok=True)
     run('xcrun', 'simctl', 'openurl', udid, f'http://127.0.0.1:{PORT}/{name}.mobileconfig')
     time.sleep(6)
@@ -92,10 +96,14 @@ def walk(udid, name):
 
 if __name__ == '__main__':
     os.makedirs(OUT, exist_ok=True)
-    udid, runtime, model = device()
-    print('device', model, runtime, udid)
+    picked = devices()
     threading.Thread(target=serve, daemon=True).start()
-    for p in sorted(os.listdir('profiles')):
-        name = p.rsplit('.', 1)[0]
-        fresh(udid)
-        walk(udid, name)
+    time.sleep(1)
+    names = sorted(p.rsplit('.', 1)[0] for p in os.listdir('profiles'))
+    for udid, runtime, model in picked:
+        tag = runtime.split('.')[-1]
+        print('device', model, runtime, udid)
+        for name in names:
+            fresh(udid)
+            walk(udid, name, tag)
+        run('xcrun', 'simctl', 'shutdown', udid, check=False)
