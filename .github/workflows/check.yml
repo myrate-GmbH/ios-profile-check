@@ -1,0 +1,26 @@
+name: profile-check
+on: workflow_dispatch
+jobs:
+  run:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          brew tap facebook/fb
+          brew install idb-companion
+          pip3 install --break-system-packages fb-idb
+      - name: Signature as macOS reads it
+        run: |
+          for f in profiles/*.mobileconfig; do echo "== $f"; security cms -D -i "$f" -o /dev/null 2>&1 && echo "decoded"; done
+      - name: Walk the simulator
+        run: |
+          python3 drive.py 2>&1 | tee drive.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: out
+          path: |
+            out/
+            drive.log
